@@ -1,10 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
-  "contracts/wormhole-soroban-client",
-  "contracts/wormhole-contract",
-  "contracts/wormhole-executor",
-  "integration-tests"
+  "contracts/executor-soroban-client",
+  "contracts/wormhole-executors",
 ]
 
 [workspace.package]
@@ -12,7 +10,7 @@ edition = "2024"
 
 [workspace.dependencies]
 soroban-sdk = "25.1.1"
-wormhole-soroban-client = { path = "contracts/wormhole-soroban-client" }
+executor-soroban-client = { path = "contracts/executor-soroban-client" }
 
 [profile.release]
 opt-level = "z"

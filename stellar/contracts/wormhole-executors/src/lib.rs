@@ -37,9 +37,9 @@
 //!
 //! - [`Executor`] - Main contract struct implementing [`ExecutorInterface`]
 //! - [`ExecutorInterface`] - Public interface (re-exported from
-//!   `wormhole-soroban-client`)
+//!   `executor-soroban-client`)
 //! - [`SignedQuote`] - Off-chain quote payload, NOT verified on-chain
-//!   (re-exported from `wormhole-soroban-client`)
+//!   (re-exported from `executor-soroban-client`)
 //! - [`RequestForExecution`] - Event emitted on successful requests
 //! - [`ExecutorError`] - Error codes returned by `request_execution`
 
@@ -48,7 +48,7 @@
 use soroban_sdk::{
     Address, Bytes, BytesN, Env, String, contract, contractevent, contractimpl, contracttype, token,
 };
-use wormhole_soroban_client::{
+use executor_soroban_client::{
     ExecutorError, ExecutorInterface, NATIVE_TOKEN_ADDRESS, SignedQuote,
 };
 

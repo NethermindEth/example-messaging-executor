@@ -1,5 +1,5 @@
 [package]
-name = "wormhole-soroban-client"
+name = "executor-soroban-client"
 version = "0.1.0"
 edition.workspace = true
 publish = false

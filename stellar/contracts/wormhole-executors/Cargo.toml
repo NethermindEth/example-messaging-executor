@@ -1,5 +1,5 @@
 [package]
-name = "wormhole-executor"
+name = "wormhole-executors"
 version = "0.1.0"
 edition.workspace = true
 
@@ -10,7 +10,7 @@ doctest = false
 [dependencies]
 # For contract code: no std on Wasm
 soroban-sdk = { workspace = true }
-wormhole-soroban-client = { workspace = true }
+executor-soroban-client = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

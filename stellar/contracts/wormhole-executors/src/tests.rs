@@ -42,13 +42,17 @@ impl MockNativeToken {
 }
 
 fn install_native_token_mock(env: &Env) -> MockNativeTokenClient<'_> {
-    let native = Address::from_string(&String::from_str(env, NATIVE_TOKEN_ADDRESS));
+    let native = Address::generate(env);
     env.register_at(&native, MockNativeToken, ());
     MockNativeTokenClient::new(env, &native)
 }
 
-fn register_executor(env: &Env, chain_id: u32) -> ExecutorClient<'_> {
-    let exec_addr = env.register(Executor, (&chain_id,));
+fn register_executor<'a>(
+    env: &'a Env,
+    chain_id: u32,
+    native_token: &Address,
+) -> ExecutorClient<'a> {
+    let exec_addr = env.register(Executor, (&chain_id, native_token));
     ExecutorClient::new(env, &exec_addr)
 }
 
@@ -68,7 +72,7 @@ fn init_roundtrip_and_version() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let client = register_executor(&env, 1234);
+    let client = register_executor(&env, 1234, &Address::generate(&env));
 
     assert_eq!(client.chain_id(), 1234);
     assert_eq!(
@@ -93,7 +97,7 @@ fn request_happy_path_pays_quote_payee_and_emits_event() {
 
     native.set_balance(&payer, &1_000);
 
-    let exec_addr = env.register(Executor, (&(src_chain as u32),));
+    let exec_addr = env.register(Executor, (&(src_chain as u32), &native.address));
     let client = ExecutorClient::new(&env, &exec_addr);
     let signed_quote = mk_quote(
         &env,
@@ -147,7 +151,7 @@ fn request_accepts_empty_request_like_the_solidity_reference() {
 
     native.set_balance(&payer, &99);
 
-    let client = register_executor(&env, src_chain as u32);
+    let client = register_executor(&env, src_chain as u32, &native.address);
     let signed_quote = mk_quote(
         &env,
         payee.clone(),
@@ -177,7 +181,7 @@ fn request_rejects_expired_quote() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().with_mut(|li| li.timestamp = 1000);
-    install_native_token_mock(&env);
+    let native = install_native_token_mock(&env);
 
     let src_chain = 111u16;
     let dst_chain = 222u16;
@@ -185,7 +189,7 @@ fn request_rejects_expired_quote() {
     let refund = Address::generate(&env);
     let dst_addr_wa32 = BytesN::<32>::from_array(&env, &[3u8; 32]);
 
-    let client = register_executor(&env, src_chain as u32);
+    let client = register_executor(&env, src_chain as u32, &native.address);
     let signed_quote = mk_quote(&env, Address::generate(&env), src_chain, dst_chain, 1000);
 
     client.request_execution(
@@ -205,7 +209,7 @@ fn request_rejects_expired_quote() {
 fn request_rejects_source_chain_mismatch() {
     let env = Env::default();
     env.mock_all_auths();
-    install_native_token_mock(&env);
+    let native = install_native_token_mock(&env);
 
     let src_chain = 77u16;
     let dst_chain = 88u16;
@@ -213,7 +217,7 @@ fn request_rejects_source_chain_mismatch() {
     let refund = Address::generate(&env);
     let dst_addr_wa32 = BytesN::<32>::from_array(&env, &[4u8; 32]);
 
-    let client = register_executor(&env, 9999);
+    let client = register_executor(&env, 9999, &native.address);
     let signed_quote = mk_quote(
         &env,
         Address::generate(&env),
@@ -239,7 +243,7 @@ fn request_rejects_source_chain_mismatch() {
 fn request_rejects_dst_chain_mismatch() {
     let env = Env::default();
     env.mock_all_auths();
-    install_native_token_mock(&env);
+    let native = install_native_token_mock(&env);
 
     let src_chain = 55u16;
     let dst_chain = 66u16;
@@ -247,7 +251,7 @@ fn request_rejects_dst_chain_mismatch() {
     let refund = Address::generate(&env);
     let dst_addr_wa32 = BytesN::<32>::from_array(&env, &[5u8; 32]);
 
-    let client = register_executor(&env, src_chain as u32);
+    let client = register_executor(&env, src_chain as u32, &native.address);
     let signed_quote = mk_quote(
         &env,
         Address::generate(&env),
@@ -273,7 +277,7 @@ fn request_rejects_dst_chain_mismatch() {
 fn request_rejects_negative_amount() {
     let env = Env::default();
     env.mock_all_auths();
-    install_native_token_mock(&env);
+    let native = install_native_token_mock(&env);
 
     let src_chain = 20u16;
     let dst_chain = 30u16;
@@ -281,7 +285,7 @@ fn request_rejects_negative_amount() {
     let refund = Address::generate(&env);
     let dst_addr_wa32 = BytesN::<32>::from_array(&env, &[9u8; 32]);
 
-    let client = register_executor(&env, src_chain as u32);
+    let client = register_executor(&env, src_chain as u32, &native.address);
     let signed_quote = mk_quote(
         &env,
         Address::generate(&env),

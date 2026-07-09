@@ -17,8 +17,8 @@
 //!    the `dst_chain` argument, and the quote has not expired relative to the
 //!    current ledger timestamp.
 //! 3. Requires the `payer`'s authorization, then transfers `amount` of the
-//!    native token (XLM, via the Stellar Asset Contract at
-//!    `NATIVE_TOKEN_ADDRESS`) from `payer` to `signed_quote.payee`.
+//!    native token (via the Stellar Asset Contract configured at construction)
+//!    from `payer` to `signed_quote.payee`.
 //! 4. Emits a [`RequestForExecution`] event that off-chain relayers consume to
 //!    fulfil the delivery on the destination chain.
 //!
@@ -45,11 +45,9 @@
 
 #![no_std]
 
+use executor_soroban_client::{ExecutorError, ExecutorInterface, SignedQuote};
 use soroban_sdk::{
     Address, Bytes, BytesN, Env, String, contract, contractevent, contractimpl, contracttype, token,
-};
-use executor_soroban_client::{
-    ExecutorError, ExecutorInterface, NATIVE_TOKEN_ADDRESS, SignedQuote,
 };
 
 #[cfg(test)]
@@ -66,6 +64,10 @@ pub enum DataKey {
     /// [`ExecutorInterface::request_execution`] to validate
     /// [`SignedQuote::src_chain`].
     ChainId,
+    /// Native-token Stellar Asset Contract address, set once by
+    /// [`Executor::__constructor`] and used to transfer payment from `payer`
+    /// to `signed_quote.payee`.
+    NativeToken,
 }
 
 /// Event emitted when a payer successfully requests a cross-chain delivery.
@@ -108,10 +110,6 @@ pub struct RequestForExecution {
     pub relay_instructions: Bytes,
 }
 
-fn get_native_token_address(env: &Env) -> Address {
-    Address::from_string(&String::from_str(env, NATIVE_TOKEN_ADDRESS))
-}
-
 /// Wormhole Executor contract for Stellar/Soroban.
 ///
 /// Implements [`ExecutorInterface`]. See the crate-level documentation for
@@ -125,16 +123,21 @@ pub struct Executor;
 impl Executor {
     /// Constructor called atomically during contract deployment.
     ///
-    /// Stores the Wormhole `chain_id` of this deployment in instance
-    /// storage. The value is read on every call to
+    /// Stores the Wormhole `chain_id` and native-token address of this
+    /// deployment in instance storage. `chain_id` is read on every call to
     /// [`ExecutorInterface::request_execution`] to validate
-    /// [`SignedQuote::src_chain`].
+    /// [`SignedQuote::src_chain`]; `native_token` is the Stellar Asset
+    /// Contract used to transfer payment.
     ///
     /// # Arguments
     ///
     /// * `chain_id` - Wormhole chain id this Executor instance runs on.
-    pub fn __constructor(env: Env, chain_id: u32) {
+    /// * `native_token` - Stellar Asset Contract address for the native token.
+    pub fn __constructor(env: Env, chain_id: u32, native_token: Address) {
         env.storage().instance().set(&DataKey::ChainId, &chain_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::NativeToken, &native_token);
     }
 }
 
@@ -189,7 +192,7 @@ impl ExecutorInterface for Executor {
             relay_instructions,
         };
 
-        let native_token = get_native_token_address(&env);
+        let native_token: Address = env.storage().instance().get(&DataKey::NativeToken).unwrap();
         let token_client = token::TokenClient::new(&env, &native_token);
         token_client.transfer(&payer, &event.signed_quote.payee, &amount);
         event.publish(&env);

@@ -1,0 +1,11 @@
+[package]
+name = "executor-requests"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["lib"]
+doctest = false
+
+[dependencies]

@@ -7,13 +7,14 @@ A payer submits an off-chain-signed quote (as opaque bytes) plus a request
 payload. The contract:
 
 1. parses the 68-byte quote header and checks its chain ids and expiry,
-2. requires the payer's authorization and transfers the native token to the
+2. binds the `payee` argument to the payee signed into the quote,
+3. requires the payer's authorization and transfers the native token to the
    `payee`,
-3. emits a `RequestForExecution` event carrying the full quote verbatim.
+4. emits a `RequestForExecution` event carrying the full quote verbatim.
 
 Off-chain relayers consume the event and fulfil the delivery on the destination
-chain. The contract does **not** verify the quote's signature or bind the payee
-— those are off-chain responsibilities (see below).
+chain. The contract binds the payee on-chain but does **not** verify the quote's
+signature — that is an off-chain responsibility (see below).
 
 ## Crates
 
@@ -42,7 +43,7 @@ body and signature off-chain. All integers are big-endian.
 | ------ | ---- | ------------- | ------------------------------------- |
 | 0      | 4    | prefix        | e.g. `EQ01` — skipped, not validated  |
 | 4      | 20   | quoterAddress | EVM address — emitted in the event    |
-| 24     | 32   | payeeAddress  | informational (see below)             |
+| 24     | 32   | payeeAddress  | must equal the `payee` argument       |
 | 56     | 2    | srcChain      | must equal this deployment's chain id |
 | 58     | 2    | dstChain      | must equal the `dst_chain` argument   |
 | 60     | 8    | expiryTime    | unix seconds — must be `> now`        |
@@ -52,13 +53,14 @@ body and signature off-chain. All integers are big-endian.
 A quote shorter than 68 bytes is rejected (`InvalidQuote`); everything past the
 header is ignored on-chain.
 
-### Payee binding and signature are off-chain
+### Payee is bound on-chain; signature verification is off-chain
 
-The contract transfers to the `payee` argument and emits the quote's 32-byte
-`payeeAddress` verbatim, but it does **not** bind the two, nor verify the
-quote's signature — a Soroban `Address` does not expose its raw bytes in
-deployed wasm. Both checks are the relayer's off-chain responsibility, which the
-verbatim-emitted quote enables.
+The contract binds the `payee` argument to the quote: the payee's 32-byte
+on-chain identity must equal the quote's `payeeAddress` at `[24..56]`, else the
+call reverts with `QuotePayeeMismatch`. This prevents a caller redirecting
+payment to an address the quote never authorized. The quote's **signature** is
+not verified on-chain — that remains the relayer's off-chain responsibility,
+which the verbatim-emitted quote enables.
 
 > Chain ids are 16-bit on the wire but `u32` at the contract ABI, because
 > Soroban has no 16-bit value type.

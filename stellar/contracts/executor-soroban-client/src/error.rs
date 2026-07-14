@@ -22,4 +22,7 @@ pub enum ExecutorError {
     InvalidAmount = 14,
     /// The signed quote is shorter than the 68-byte header.
     InvalidQuote = 15,
+    /// The `payee` argument's on-chain identity does not match the 32-byte
+    /// payee the quoter signed at `quote[24..56]`.
+    QuotePayeeMismatch = 16,
 }

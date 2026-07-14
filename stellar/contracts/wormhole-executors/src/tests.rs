@@ -79,6 +79,16 @@ fn build_quote(
     bytes
 }
 
+/// The 32-byte on-chain identity of an address, as the quoter must encode it at
+/// `quote[24..56]` for the payee binding to pass.
+fn payee_id(a: &Address) -> [u8; 32] {
+    match a.to_payload().unwrap() {
+        AddressPayload::AccountIdPublicKeyEd25519(b) | AddressPayload::ContractIdHash(b) => {
+            b.to_array()
+        }
+    }
+}
+
 #[test]
 fn init_roundtrip_and_version() {
     let env = Env::default();
@@ -112,7 +122,7 @@ fn happy_path() {
     let quote = build_quote(
         &env,
         &[7u8; 20],
-        &[0u8; 32],
+        &payee_id(&payee),
         src_chain,
         dst_chain,
         env.ledger().timestamp() + 600,
@@ -169,7 +179,7 @@ fn event_preserves_full_quote_bytes() {
     let quote = build_quote(
         &env,
         &quoter,
-        &[0xCD; 32],
+        &payee_id(&payee),
         src_chain,
         dst_chain,
         env.ledger().timestamp() + 1,
@@ -221,7 +231,7 @@ fn accepts_empty_request_and_relay_instructions() {
     let quote = build_quote(
         &env,
         &[0u8; 20],
-        &[0u8; 32],
+        &payee_id(&payee),
         src_chain,
         dst_chain,
         env.ledger().timestamp() + 60,
@@ -354,6 +364,40 @@ fn rejects_dst_chain_mismatch() {
     client.request_execution(
         &99,
         &BytesN::<32>::from_array(&env, &[5u8; 32]),
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &1,
+        &quote,
+        &Bytes::new(&env),
+        &Bytes::new(&env),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #16)")] // QuotePayeeMismatch
+fn rejects_payee_mismatch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let native = install_native_token_mock(&env);
+
+    let src_chain = 40u16;
+    let dst_chain = 50u16;
+    let client = register_executor(&env, src_chain, &native.address);
+    // Quote signs one payee; the call passes a different one.
+    let quote = build_quote(
+        &env,
+        &[0u8; 20],
+        &payee_id(&Address::generate(&env)),
+        src_chain,
+        dst_chain,
+        env.ledger().timestamp() + 600,
+        &[],
+    );
+
+    client.request_execution(
+        &u32::from(dst_chain),
+        &BytesN::<32>::from_array(&env, &[6u8; 32]),
         &Address::generate(&env),
         &Address::generate(&env),
         &Address::generate(&env),

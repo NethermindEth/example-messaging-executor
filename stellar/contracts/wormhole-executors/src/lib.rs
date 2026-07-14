@@ -14,20 +14,21 @@
 //! 2. Validates basic sanity: `amount >= 0`, the quote is at least a full
 //!    header, the header's `srcChain` matches the chain id configured at
 //!    construction, the header's `dstChain` matches the `dst_chain` argument,
-//!    and the quote has not expired relative to the current ledger timestamp.
+//!    the quote has not expired relative to the current ledger timestamp, and
+//!    the `payee` argument matches the payee signed into the quote header.
 //! 3. Requires the `payer`'s authorization, then transfers `amount` of the
 //!    native token (via the Stellar Asset Contract configured at construction)
 //!    from `payer` to `payee`.
 //! 4. Emits a [`RequestForExecution`] event carrying the full quote verbatim so
 //!    off-chain relayers can verify it and fulfil the delivery.
 //!
-//! # Quote authentication and payee binding are OFF-CHAIN
+//! # Payee is bound on-chain; signature verification is OFF-CHAIN
 //!
-//! The contract does not verify the quote's signature, nor does it bind the
-//! `payee` argument to the 32-byte payee inside the quote header: a Soroban
-//! `Address` does not expose its raw bytes in deployed wasm. Both the signature
-//! and the `payee`/`quote[24..56]` binding are the relayer's off-chain
-//! responsibility, which the verbatim-emitted quote enables.
+//! The contract binds the `payee` argument to the 32-byte payee the quoter
+//! signed at `quote[24..56]`, so a caller cannot redirect payment to an
+//! address the quote did not authorize. It does not verify the quote's
+//! *signature* — that remains the relayer's off-chain responsibility, which
+//! the verbatim-emitted quote enables.
 //!
 //! # Architecture
 //!
@@ -41,7 +42,8 @@
 
 use executor_soroban_client::{ExecutorError, ExecutorInterface};
 use soroban_sdk::{
-    Address, Bytes, BytesN, Env, String, contract, contractevent, contractimpl, contracttype, token,
+    Address, Bytes, BytesN, Env, String, address_payload::AddressPayload, contract, contractevent,
+    contractimpl, contracttype, token,
 };
 
 #[cfg(test)]
@@ -111,18 +113,18 @@ fn read_u64_be(b: &Bytes, at: u32) -> u64 {
     u64::from_be_bytes(buf)
 }
 
-fn read_quoter(env: &Env, b: &Bytes) -> BytesN<20> {
-    let mut buf = [0u8; 20];
-    b.slice(4..24).copy_into_slice(&mut buf);
+fn read_bytes<const N: usize>(env: &Env, b: &Bytes, at: u32) -> BytesN<N> {
+    let mut buf = [0u8; N];
+    b.slice(at..at + N as u32).copy_into_slice(&mut buf);
     BytesN::from_array(env, &buf)
 }
 
 /// Wormhole Executor contract for Stellar/Soroban.
 ///
 /// Implements [`ExecutorInterface`]. See the crate-level documentation for the
-/// Executor's role as a prepaid cross-chain delivery payment rail and for the
-/// important note that quote authentication and payee binding are **not**
-/// performed on chain.
+/// Executor's role as a prepaid cross-chain delivery payment rail, and for the
+/// note that the payee is bound to the quote on-chain while quote *signature*
+/// verification remains off-chain.
 #[contract]
 pub struct Executor;
 
@@ -189,6 +191,18 @@ impl ExecutorInterface for Executor {
         if read_u64_be(&signed_quote_bytes, 60) <= env.ledger().timestamp() {
             return Err(ExecutorError::QuoteExpired);
         }
+        // Bind the payment to the quote: the payee's on-chain identity must
+        // equal the 32-byte payee the quoter signed, so a caller cannot
+        // redirect payment to an unauthorized address.
+        let payee_id = match payee.to_payload() {
+            Some(
+                AddressPayload::AccountIdPublicKeyEd25519(id) | AddressPayload::ContractIdHash(id),
+            ) => id,
+            None => return Err(ExecutorError::QuotePayeeMismatch),
+        };
+        if payee_id != read_bytes::<32>(&env, &signed_quote_bytes, 24) {
+            return Err(ExecutorError::QuotePayeeMismatch);
+        }
 
         payer.require_auth();
 
@@ -196,7 +210,7 @@ impl ExecutorInterface for Executor {
         token::TokenClient::new(&env, &native_token).transfer(&payer, &payee, &amount);
 
         RequestForExecution {
-            quoter_address: read_quoter(&env, &signed_quote_bytes),
+            quoter_address: read_bytes::<20>(&env, &signed_quote_bytes, 4),
             amt_paid: amount,
             dst_chain,
             dst_addr,

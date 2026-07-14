@@ -8,8 +8,9 @@ crate-type = ["lib", "cdylib"]
 doctest = false
 
 [dependencies]
-# For contract code: no std on Wasm
-soroban-sdk = { workspace = true }
+# For contract code: no std on Wasm. hazmat-address unlocks Address::to_payload,
+# used to bind the payee to the signed quote on-chain.
+soroban-sdk = { workspace = true, features = ["hazmat-address"] }
 executor-soroban-client = { workspace = true }
 
 [dev-dependencies]

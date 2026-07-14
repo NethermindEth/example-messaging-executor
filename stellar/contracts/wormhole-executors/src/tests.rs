@@ -4,8 +4,6 @@ use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
 };
 
-const SIGNED_QUOTE_PREFIX: [u8; 4] = *b"EQ01";
-
 #[contracttype]
 #[derive(Clone)]
 enum MockTokenStorage {
@@ -42,33 +40,60 @@ impl MockNativeToken {
 }
 
 fn install_native_token_mock(env: &Env) -> MockNativeTokenClient<'_> {
-    let native = Address::from_string(&String::from_str(env, NATIVE_TOKEN_ADDRESS));
+    let native = Address::generate(env);
     env.register_at(&native, MockNativeToken, ());
     MockNativeTokenClient::new(env, &native)
 }
 
-fn register_executor(env: &Env, chain_id: u32) -> ExecutorClient<'_> {
-    let exec_addr = env.register(Executor, (&chain_id,));
+fn register_executor<'a>(
+    env: &'a Env,
+    chain_id: u16,
+    native_token: &Address,
+) -> ExecutorClient<'a> {
+    let exec_addr = env.register(Executor, (&u32::from(chain_id), native_token));
     ExecutorClient::new(env, &exec_addr)
 }
 
-fn mk_quote(env: &Env, payee: Address, src_chain: u16, dst_chain: u16, expiry: u64) -> SignedQuote {
-    SignedQuote {
-        prefix: BytesN::from_array(env, &SIGNED_QUOTE_PREFIX),
-        quoter: Address::generate(env),
-        payee,
-        src_chain: u32::from(src_chain),
-        dst_chain: u32::from(dst_chain),
-        expiry,
+/// Assembles raw quote bytes: prefix(4) quoter(20) payee(32) src(2 be)
+/// dst(2 be) expiry(8 be), followed by an opaque `tail` (EQ01 body + signature)
+/// that the contract must preserve verbatim.
+fn build_quote(
+    env: &Env,
+    quoter: &[u8; 20],
+    payee32: &[u8; 32],
+    src: u16,
+    dst: u16,
+    expiry: u64,
+    tail: &[u8],
+) -> Bytes {
+    let mut header = [0u8; 68];
+    header[0..4].copy_from_slice(b"EQ01");
+    header[4..24].copy_from_slice(quoter);
+    header[24..56].copy_from_slice(payee32);
+    header[56..58].copy_from_slice(&src.to_be_bytes());
+    header[58..60].copy_from_slice(&dst.to_be_bytes());
+    header[60..68].copy_from_slice(&expiry.to_be_bytes());
+
+    let mut bytes = Bytes::from_slice(env, &header);
+    bytes.append(&Bytes::from_slice(env, tail));
+    bytes
+}
+
+/// The 32-byte on-chain identity of an address, as the quoter must encode it at
+/// `quote[24..56]` for the payee binding to pass.
+fn payee_id(a: &Address) -> [u8; 32] {
+    match a.to_payload().unwrap() {
+        AddressPayload::AccountIdPublicKeyEd25519(b) | AddressPayload::ContractIdHash(b) => {
+            b.to_array()
+        }
     }
 }
 
 #[test]
 fn init_roundtrip_and_version() {
     let env = Env::default();
-    env.mock_all_auths();
 
-    let client = register_executor(&env, 1234);
+    let client = register_executor(&env, 1234, &Address::generate(&env));
 
     assert_eq!(client.chain_id(), 1234);
     assert_eq!(
@@ -78,226 +103,340 @@ fn init_roundtrip_and_version() {
 }
 
 #[test]
-fn request_happy_path_pays_quote_payee_and_emits_event() {
+fn happy_path() {
     let env = Env::default();
     env.mock_all_auths();
     let native = install_native_token_mock(&env);
 
     let src_chain = 1234u16;
     let dst_chain = 4321u16;
-    let payee = Address::generate(&env);
     let payer = Address::generate(&env);
+    let payee = Address::generate(&env);
     let refund = Address::generate(&env);
-    let dst_addr_wa32 = BytesN::<32>::from_array(&env, &[9u8; 32]);
+    let dst_addr = BytesN::<32>::from_array(&env, &[9u8; 32]);
     let amount = 250i128;
 
     native.set_balance(&payer, &1_000);
 
-    let exec_addr = env.register(Executor, (&(src_chain as u32),));
-    let client = ExecutorClient::new(&env, &exec_addr);
-    let signed_quote = mk_quote(
+    let client = register_executor(&env, src_chain, &native.address);
+    let quote = build_quote(
         &env,
-        payee.clone(),
+        &[7u8; 20],
+        &payee_id(&payee),
         src_chain,
         dst_chain,
         env.ledger().timestamp() + 600,
+        &[],
     );
     let request = Bytes::from_slice(&env, b"any-request-bytes");
     let relay_instructions = Bytes::from_slice(&env, &[0xCA, 0xFE]);
 
     client.request_execution(
-        &(dst_chain as u32),
-        &dst_addr_wa32,
+        &u32::from(dst_chain),
+        &dst_addr,
         &refund,
         &payer,
+        &payee,
         &amount,
-        &signed_quote,
+        &quote,
         &request,
         &relay_instructions,
     );
 
     let expected = RequestForExecution {
-        quoter: signed_quote.quoter.clone(),
+        quoter_address: BytesN::from_array(&env, &[7u8; 20]),
         amt_paid: amount,
-        dst_chain: dst_chain as u32,
-        dst_addr_wa32: dst_addr_wa32.clone(),
-        refund: refund.clone(),
-        signed_quote: signed_quote.clone(),
-        request: request.clone(),
-        relay_instructions: relay_instructions.clone(),
+        dst_chain: u32::from(dst_chain),
+        dst_addr,
+        refund_addr: refund,
+        signed_quote: quote,
+        request,
+        relay_instructions,
     };
 
-    assert_eq!(env.events().all(), [expected.to_xdr(&env, &exec_addr)]);
+    assert_eq!(env.events().all(), [expected.to_xdr(&env, &client.address)]);
     assert_eq!(native.balance(&payer), 750);
     assert_eq!(native.balance(&payee), amount);
 }
 
+/// A full 165-byte EQ01 quote (68 header + 32 body + 65 signature) must be
+/// emitted byte-for-byte, proving the body and signature survive for off-chain
+/// verification, and the 20-byte quoter must be lifted out of the header.
 #[test]
-fn request_accepts_empty_request_like_the_solidity_reference() {
+fn event_preserves_full_quote_bytes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let native = install_native_token_mock(&env);
+
+    let src_chain = 61u16;
+    let dst_chain = 2u16;
+    let payer = Address::generate(&env);
+    let payee = Address::generate(&env);
+    native.set_balance(&payer, &10);
+
+    let quoter = [0xABu8; 20];
+    let tail: [u8; 97] = core::array::from_fn(|i| i as u8); // 32-byte body + 65-byte signature
+    let quote = build_quote(
+        &env,
+        &quoter,
+        &payee_id(&payee),
+        src_chain,
+        dst_chain,
+        env.ledger().timestamp() + 1,
+        &tail,
+    );
+    assert_eq!(quote.len(), 165);
+
+    let client = register_executor(&env, src_chain, &native.address);
+    let dst_addr = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    let refund = Address::generate(&env);
+
+    client.request_execution(
+        &u32::from(dst_chain),
+        &dst_addr,
+        &refund,
+        &payer,
+        &payee,
+        &5,
+        &quote,
+        &Bytes::new(&env),
+        &Bytes::new(&env),
+    );
+
+    let expected = RequestForExecution {
+        quoter_address: BytesN::from_array(&env, &quoter),
+        amt_paid: 5,
+        dst_chain: u32::from(dst_chain),
+        dst_addr,
+        refund_addr: refund,
+        signed_quote: quote,
+        request: Bytes::new(&env),
+        relay_instructions: Bytes::new(&env),
+    };
+    assert_eq!(env.events().all(), [expected.to_xdr(&env, &client.address)]);
+}
+
+#[test]
+fn accepts_empty_request_and_relay_instructions() {
     let env = Env::default();
     env.mock_all_auths();
     let native = install_native_token_mock(&env);
 
     let src_chain = 10u16;
     let dst_chain = 20u16;
-    let payee = Address::generate(&env);
     let payer = Address::generate(&env);
-    let refund = Address::generate(&env);
-    let dst_addr_wa32 = BytesN::<32>::from_array(&env, &[1u8; 32]);
+    let payee = Address::generate(&env);
 
-    native.set_balance(&payer, &99);
-
-    let client = register_executor(&env, src_chain as u32);
-    let signed_quote = mk_quote(
+    let client = register_executor(&env, src_chain, &native.address);
+    let quote = build_quote(
         &env,
-        payee.clone(),
+        &[0u8; 20],
+        &payee_id(&payee),
         src_chain,
         dst_chain,
         env.ledger().timestamp() + 60,
+        &[],
     );
 
     let res = client.try_request_execution(
-        &(dst_chain as u32),
-        &dst_addr_wa32,
-        &refund,
+        &u32::from(dst_chain),
+        &BytesN::<32>::from_array(&env, &[1u8; 32]),
+        &Address::generate(&env),
         &payer,
-        &42,
-        &signed_quote,
+        &payee,
+        &0,
+        &quote,
         &Bytes::new(&env),
         &Bytes::new(&env),
     );
 
     assert_eq!(res, Ok(Ok(())));
-    assert_eq!(native.balance(&payee), 42);
+    assert_eq!(native.balance(&payee), 0);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #11)")] // QuoteExpired
-fn request_rejects_expired_quote() {
+#[should_panic(expected = "Error(Contract, #15)")] // InvalidQuote
+fn rejects_quote_shorter_than_header() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let native = install_native_token_mock(&env);
+
+    let client = register_executor(&env, 1, &native.address);
+
+    client.request_execution(
+        &2,
+        &BytesN::<32>::from_array(&env, &[0u8; 32]),
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &1,
+        &Bytes::from_slice(&env, &[0u8; 67]),
+        &Bytes::new(&env),
+        &Bytes::new(&env),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")] // QuoteExpired (boundary: strict >)
+fn rejects_expired_quote() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().with_mut(|li| li.timestamp = 1000);
-    install_native_token_mock(&env);
+    let native = install_native_token_mock(&env);
 
     let src_chain = 111u16;
     let dst_chain = 222u16;
-    let payer = Address::generate(&env);
-    let refund = Address::generate(&env);
-    let dst_addr_wa32 = BytesN::<32>::from_array(&env, &[3u8; 32]);
-
-    let client = register_executor(&env, src_chain as u32);
-    let signed_quote = mk_quote(&env, Address::generate(&env), src_chain, dst_chain, 1000);
+    let client = register_executor(&env, src_chain, &native.address);
+    let quote = build_quote(
+        &env,
+        &[0u8; 20],
+        &[0u8; 32],
+        src_chain,
+        dst_chain,
+        1000,
+        &[],
+    );
 
     client.request_execution(
-        &(dst_chain as u32),
-        &dst_addr_wa32,
-        &refund,
-        &payer,
+        &u32::from(dst_chain),
+        &BytesN::<32>::from_array(&env, &[3u8; 32]),
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &Address::generate(&env),
         &1,
-        &signed_quote,
-        &Bytes::from_slice(&env, b"request"),
+        &quote,
+        &Bytes::new(&env),
         &Bytes::new(&env),
     );
 }
 
 #[test]
 #[should_panic(expected = "Error(Contract, #12)")] // QuoteSrcChainMismatch
-fn request_rejects_source_chain_mismatch() {
+fn rejects_src_chain_mismatch() {
     let env = Env::default();
     env.mock_all_auths();
-    install_native_token_mock(&env);
+    let native = install_native_token_mock(&env);
 
-    let src_chain = 77u16;
     let dst_chain = 88u16;
-    let payer = Address::generate(&env);
-    let refund = Address::generate(&env);
-    let dst_addr_wa32 = BytesN::<32>::from_array(&env, &[4u8; 32]);
-
-    let client = register_executor(&env, 9999);
-    let signed_quote = mk_quote(
+    let client = register_executor(&env, 9999, &native.address);
+    let quote = build_quote(
         &env,
-        Address::generate(&env),
-        src_chain,
+        &[0u8; 20],
+        &[0u8; 32],
+        77,
         dst_chain,
         env.ledger().timestamp() + 600,
+        &[],
     );
 
     client.request_execution(
-        &(dst_chain as u32),
-        &dst_addr_wa32,
-        &refund,
-        &payer,
+        &u32::from(dst_chain),
+        &BytesN::<32>::from_array(&env, &[4u8; 32]),
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &Address::generate(&env),
         &1,
-        &signed_quote,
-        &Bytes::from_slice(&env, b"request"),
+        &quote,
+        &Bytes::new(&env),
         &Bytes::new(&env),
     );
 }
 
 #[test]
 #[should_panic(expected = "Error(Contract, #13)")] // QuoteDstChainMismatch
-fn request_rejects_dst_chain_mismatch() {
+fn rejects_dst_chain_mismatch() {
     let env = Env::default();
     env.mock_all_auths();
-    install_native_token_mock(&env);
+    let native = install_native_token_mock(&env);
 
     let src_chain = 55u16;
-    let dst_chain = 66u16;
-    let payer = Address::generate(&env);
-    let refund = Address::generate(&env);
-    let dst_addr_wa32 = BytesN::<32>::from_array(&env, &[5u8; 32]);
-
-    let client = register_executor(&env, src_chain as u32);
-    let signed_quote = mk_quote(
+    let client = register_executor(&env, src_chain, &native.address);
+    let quote = build_quote(
         &env,
-        Address::generate(&env),
+        &[0u8; 20],
+        &[0u8; 32],
         src_chain,
-        dst_chain,
+        66,
         env.ledger().timestamp() + 600,
+        &[],
     );
 
     client.request_execution(
-        &99u32,
-        &dst_addr_wa32,
-        &refund,
-        &payer,
+        &99,
+        &BytesN::<32>::from_array(&env, &[5u8; 32]),
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &Address::generate(&env),
         &1,
-        &signed_quote,
-        &Bytes::from_slice(&env, b"request"),
+        &quote,
+        &Bytes::new(&env),
+        &Bytes::new(&env),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #16)")] // QuotePayeeMismatch
+fn rejects_payee_mismatch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let native = install_native_token_mock(&env);
+
+    let src_chain = 40u16;
+    let dst_chain = 50u16;
+    let client = register_executor(&env, src_chain, &native.address);
+    // Quote signs one payee; the call passes a different one.
+    let quote = build_quote(
+        &env,
+        &[0u8; 20],
+        &payee_id(&Address::generate(&env)),
+        src_chain,
+        dst_chain,
+        env.ledger().timestamp() + 600,
+        &[],
+    );
+
+    client.request_execution(
+        &u32::from(dst_chain),
+        &BytesN::<32>::from_array(&env, &[6u8; 32]),
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &1,
+        &quote,
+        &Bytes::new(&env),
         &Bytes::new(&env),
     );
 }
 
 #[test]
 #[should_panic(expected = "Error(Contract, #14)")] // InvalidAmount
-fn request_rejects_negative_amount() {
+fn rejects_negative_amount() {
     let env = Env::default();
     env.mock_all_auths();
-    install_native_token_mock(&env);
+    let native = install_native_token_mock(&env);
 
     let src_chain = 20u16;
     let dst_chain = 30u16;
-    let payer = Address::generate(&env);
-    let refund = Address::generate(&env);
-    let dst_addr_wa32 = BytesN::<32>::from_array(&env, &[9u8; 32]);
-
-    let client = register_executor(&env, src_chain as u32);
-    let signed_quote = mk_quote(
+    let client = register_executor(&env, src_chain, &native.address);
+    let quote = build_quote(
         &env,
-        Address::generate(&env),
+        &[0u8; 20],
+        &[0u8; 32],
         src_chain,
         dst_chain,
         env.ledger().timestamp() + 600,
+        &[],
     );
 
     client.request_execution(
-        &(dst_chain as u32),
-        &dst_addr_wa32,
-        &refund,
-        &payer,
+        &u32::from(dst_chain),
+        &BytesN::<32>::from_array(&env, &[9u8; 32]),
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &Address::generate(&env),
         &-1,
-        &signed_quote,
-        &Bytes::from_slice(&env, b"request"),
+        &quote,
+        &Bytes::new(&env),
         &Bytes::new(&env),
     );
 }

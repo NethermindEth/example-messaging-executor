@@ -10,7 +10,7 @@ members = [
 edition = "2024"
 
 [workspace.dependencies]
-soroban-sdk = "27.0.0"
+soroban-sdk = "27.0.5"
 executor-soroban-client = { path = "contracts/executor-soroban-client" }
 
 [profile.release]
